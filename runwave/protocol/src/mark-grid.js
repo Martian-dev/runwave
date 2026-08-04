@@ -17,6 +17,12 @@ function viewportFromConfig(config = {}) {
   return config.viewport || config.videoSize || null;
 }
 
+// Defaults to the historical scatter so existing playtest behaviour is unchanged.
+function gridSampleMode(config = {}) {
+  const raw = String(config.markGridSampleMode ?? config.gridSampleMode ?? 'random').toLowerCase();
+  return raw === 'center' || raw === 'centre' ? 'center' : 'random';
+}
+
 function gridSafeSampleRatio(config = {}) {
   const raw = Number(
     config.markGridSafeSampleRatio
@@ -91,7 +97,8 @@ function randomPointInCells(
   viewport,
   grid = DEFAULT_MARK_GRID,
   rng = Math.random,
-  safeSampleRatio = DEFAULT_GRID_SAFE_SAMPLE_RATIO
+  safeSampleRatio = DEFAULT_GRID_SAFE_SAMPLE_RATIO,
+  sampleMode = 'random'
 ) {
   const normalized = normalizeCellList(cells, grid, 4);
   if (!normalized.length) {
@@ -99,6 +106,16 @@ function randomPointInCells(
   }
   const cell = normalized[Math.floor(rng() * normalized.length)];
   const bounds = cellBounds(cell, viewport, grid);
+  // Scattering within a cell varies footage for playtest recordings. An agent
+  // aiming at a specific target instead needs the same cell to mean the same
+  // pixel every time, so a saved action trace replays identically.
+  if (sampleMode === 'center') {
+    return {
+      x: Math.max(0, Math.min(Math.round((bounds.left + bounds.right) / 2), Math.round(Number(viewport.width)) - 1)),
+      y: Math.max(0, Math.min(Math.round((bounds.top + bounds.bottom) / 2), Math.round(Number(viewport.height)) - 1)),
+      cells: normalized,
+    };
+  }
   const ratio = Number.isFinite(Number(safeSampleRatio))
     && Number(safeSampleRatio) > 0
     && Number(safeSampleRatio) <= 1
@@ -131,6 +148,7 @@ function clickBurstTimes(at, duration, count = 10, intervalMs = 100) {
 module.exports = {
   DEFAULT_GRID_SAFE_SAMPLE_RATIO,
   DEFAULT_MARK_GRID,
+  gridSampleMode,
   gridSafeSampleRatio,
   markGridFromConfig,
   viewportFromConfig,

@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>MCP Test Game</title>
+  <style>
+    html, body { margin: 0; background: #101018; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="stage" width="640" height="360"></canvas>
+<script>
+  // Minimal deterministic game: a block that moves while a key is held, and a
+  // target that changes colour when clicked. Enough to exercise held-key
+  // timing, click coordinates, and frame-change detection.
+  const canvas = document.getElementById('stage');
+  const ctx = canvas.getContext('2d');
+  const held = new Set();
+  const state = { x: 60, y: 180, hits: 0, target: { x: 480, y: 140, w: 80, h: 80 }, lit: false };
+  window.gameState = state;
+
+  addEventListener('keydown', (event) => { held.add(event.code); event.preventDefault(); });
+  addEventListener('keyup', (event) => { held.delete(event.code); event.preventDefault(); });
+
+  canvas.addEventListener('mousedown', (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const t = state.target;
+    if (x >= t.x && x <= t.x + t.w && y >= t.y && y <= t.y + t.h) {
+      state.hits += 1;
+      state.lit = true;
+    }
+    state.lastClick = { x: Math.round(x), y: Math.round(y) };
+  });
+
+  function frame() {
+    const speed = 3;
+    if (held.has('ArrowRight') || held.has('KeyD')) state.x += speed;
+    if (held.has('ArrowLeft') || held.has('KeyA')) state.x -= speed;
+    if (held.has('ArrowDown') || held.has('KeyS')) state.y += speed;
+    if (held.has('ArrowUp') || held.has('KeyW')) state.y -= speed;
+    state.x = Math.max(0, Math.min(state.x, canvas.width - 30));
+    state.y = Math.max(0, Math.min(state.y, canvas.height - 30));
+
+    ctx.fillStyle = '#101018';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const t = state.target;
+    ctx.fillStyle = state.lit ? '#4ade80' : '#3f3f52';
+    ctx.fillRect(t.x, t.y, t.w, t.h);
+    ctx.fillStyle = '#f87171';
+    ctx.fillRect(state.x, state.y, 30, 30);
+    ctx.fillStyle = '#e5e7eb';
+    ctx.font = '16px monospace';
+    ctx.fillText('x=' + Math.round(state.x) + ' hits=' + state.hits, 12, 24);
+    requestAnimationFrame(frame);
+  }
+  frame();
+</script>
+</body>
+</html>

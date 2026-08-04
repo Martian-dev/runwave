@@ -4,6 +4,7 @@ const {
   cellsFromObject,
   clickBurstTimes,
   gridSafeSampleRatio,
+  gridSampleMode,
   markGridFromConfig,
   randomPointInCells,
   viewportFromConfig,
@@ -167,7 +168,8 @@ function normalizePoint(point, label, options) {
         viewport,
         grid,
         Math.random,
-        gridSafeSampleRatio(options.config || {})
+        gridSafeSampleRatio(options.config || {}),
+        gridSampleMode(options.config || {})
       );
     } catch (error) {
       if (options.strict) throw new Error(`${label} ${error.message}`);
