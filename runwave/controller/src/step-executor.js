@@ -35,7 +35,7 @@ async function releasePressedKeys(browser, pressed, profiler) {
   }
 }
 
-async function executeTimeline({ browser, events, duration, outputDir, prefix, stateExpression, profiler }) {
+async function executeTimeline({ browser, events, duration, outputDir, prefix, stateExpression, beforeEndCapture, profiler }) {
   const pressed = new Set();
   const captures = [];
   const startedAt = Date.now();
@@ -97,6 +97,7 @@ async function executeTimeline({ browser, events, duration, outputDir, prefix, s
           await browser.moveView(event.viewMove);
         }
       } else if (event.type === 'capture') {
+        if (beforeEndCapture && event.at === duration) await beforeEndCapture();
         captures.push(await (profiler
           ? profiler.time('timeline.event.capture', fields, () =>
               captureAt({ browser, outputDir, prefix, stateExpression, at: event.at, profiler })

@@ -235,10 +235,14 @@ List known sessions:
 runwave-controller '{"action":"sessions"}'
 ```
 
-When `record: true` is set, `stop` returns `video` and `audioVideo` pointing at
-the same recorded audio/video WebM. All recording goes through gstreamer - see
-the top-level [Requirements](../../README.md#requirements) section for the
-mandatory environment (Linux, gstreamer, X server/Xvfb, PulseAudio).
+When `record: true` is set, `stop` returns the recorded WebM in `video`.
+Recording uses gstreamer by default; see the top-level
+[Requirements](../../README.md#requirements) section for the mandatory Linux,
+X server/Xvfb, and PulseAudio environment. Web sessions can instead set
+`"recordingBackend":"playwright"` to capture the browser viewport directly.
+That backend can run headlessly and does not require X11, but is video-only.
+`recordAudio: true` continues to require the gstreamer backend and returns the
+same audio/video WebM in both `video` and `audioVideo`.
 
 ## State
 

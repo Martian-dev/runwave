@@ -7,6 +7,7 @@ const { DEFAULT_MARK_GRID } = require('../../runwave/protocol/src/mark-grid');
 // Spans are pulled from the protocol rather than restated, so the tool contract
 // cannot drift from what the executor actually enforces.
 const span = (type) => (MAX_ACTION_SPAN_MS[type] ? ` Max ${MAX_ACTION_SPAN_MS[type]}ms.` : '');
+const MCP_CLICK_MAX_MS = 2000;
 
 const cell = z
   .object({
@@ -34,7 +35,7 @@ const keyAction = z.object({
 const clickAction = z.object({
   type: z.literal('click'),
   start,
-  end: z.number().min(0).optional().describe(`Hold duration.${span('click')}`),
+  end: z.number().min(0).optional().describe(`Release offset. Omit for a short click; use a longer span for a held game button such as sustained fire. Max ${MCP_CLICK_MAX_MS}ms.`),
   ...point.shape,
   button: z.enum(['left', 'middle', 'right']).optional(),
   clickCount: z.number().int().min(1).max(3).optional(),
@@ -76,7 +77,7 @@ const viewMoveAction = z.object({
   dx: z.number().optional().describe('Relative pointer delta X. Positive is right.'),
   dy: z.number().optional().describe('Relative pointer delta Y. Positive is down.'),
   steps: z.number().int().min(1).max(80).optional(),
-}).describe('Relative mouse movement for pointer-lock/FPS camera control.');
+}).describe('Relative mouse movement for pointer-lock/FPS camera control. Start with a small calibration move because game sensitivity varies.');
 
 const action = z
   .discriminatedUnion('type', [

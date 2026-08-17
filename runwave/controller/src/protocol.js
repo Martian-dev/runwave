@@ -141,6 +141,21 @@ function optionalPositiveInteger(value) {
   return Number.isInteger(number) && number > 0 ? number : null;
 }
 
+function recordingBackend(input = {}, env = process.env) {
+  if (!input.record && !input.recordAudio) return null;
+  const raw = String(
+    input.recordingBackend
+      ?? input.recording_backend
+      ?? input.recordBackend
+      ?? input.videoBackend
+      ?? env.RUNWAVE_RECORDING_BACKEND
+      ?? 'gstreamer'
+  ).trim().toLowerCase();
+  if (raw === 'gstreamer' || raw === 'x11') return 'gstreamer';
+  if (raw === 'playwright' || raw === 'playwright-native' || raw === 'native') return 'playwright';
+  throw new Error(`unsupported recording backend: ${raw}`);
+}
+
 function linuxStartConfig(input = {}) {
   const launch = input.launch && typeof input.launch === 'object' ? input.launch : {};
   const launchEnv = input.env ?? launch.env;
@@ -182,12 +197,17 @@ function startSessionConfig(input, options = {}) {
   const kind = targetKind(input);
   const viewport = normalizeSize(input.viewport, { width: 1024, height: 620 });
   const record = Boolean(input.record || input.recordAudio);
+  const backend = recordingBackend(input);
+  if (kind === 'linux' && backend && backend !== 'gstreamer') {
+    throw new Error(`the ${backend} recording backend is only available for web sessions`);
+  }
   const common = {
     kind,
     context: {
       viewport,
       deviceScaleFactor: optionalNumber(input.deviceScaleFactor, 1),
       record,
+      recordingBackend: backend,
       videoSize: record ? normalizeSize(input.videoSize || input.viewport, viewport) : null,
     },
     defaults: {
@@ -216,7 +236,7 @@ function startSessionConfig(input, options = {}) {
     launchUrl: web.launchUrl,
     web,
     browser: {
-      headless: record ? false : input.headless !== false,
+      headless: backend === 'gstreamer' ? false : input.headless !== false,
       channel: optionalString(input.channel),
       executablePath: optionalString(input.executablePath),
       chromiumArgsMode: String(input.chromiumArgsMode || process.env.RUNWAVE_CHROMIUM_ARGS_MODE || 'append').toLowerCase(),
@@ -261,6 +281,7 @@ module.exports = {
   linuxStartConfig,
   webStartConfig,
   parseArgList,
+  recordingBackend,
   startSessionConfig,
   diffStartSessionConfig,
   isListSessionsAction,

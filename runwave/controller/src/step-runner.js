@@ -27,7 +27,7 @@ function summarizeActions(step) {
   ].sort((left, right) => (left.start ?? 0) - (right.start ?? 0));
 }
 
-async function runStep({ input, config, browser, outputDir, nextStepIndex, actionName, profiler }) {
+async function runStep({ input, config, browser, outputDir, nextStepIndex, actionName, beforeEndCapture, profiler }) {
   const timeSync = (event, fields, fn) => (profiler ? profiler.timeSync(event, fields, fn) : fn());
   const time = (event, fields, fn) => (profiler ? profiler.time(event, fields, fn) : fn());
 
@@ -58,6 +58,7 @@ async function runStep({ input, config, browser, outputDir, nextStepIndex, actio
       outputDir,
       prefix,
       stateExpression: input.stateExpression,
+      beforeEndCapture,
       profiler: profiler ? profiler.child('step-executor') : null,
     })
   );

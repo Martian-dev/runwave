@@ -6,7 +6,8 @@ const { chromium } = require('playwright');
 const { AudioVideoRecorder } = require('./audio-recorder');
 const { ensureDir, safeName, sleep, timestamp } = require('./file-utils');
 const { drawGridOnScreenshot } = require('./grid-overlay');
-const { parseArgList, targetUrl } = require('./protocol');
+const { browserPauseInitScript } = require('./browser-pause');
+const { parseArgList, recordingBackend, targetUrl } = require('./protocol');
 const { readPageState } = require('./state-reader');
 
 const DEFAULT_CHROMIUM_ARGS = [
@@ -42,9 +43,13 @@ function isRecording(config = {}) {
   return Boolean(config.record || config.recordAudio);
 }
 
+function usesGstreamerRecording(config = {}) {
+  return recordingBackend(config) === 'gstreamer';
+}
+
 function chromiumLaunchArgs(config = {}, env = process.env) {
   const args = chromiumArgs(config, env);
-  if (!isRecording(config)) return args;
+  if (!usesGstreamerRecording(config)) return args;
   const size = videoSize(config);
   return [
     ...args,
@@ -57,7 +62,7 @@ function chromiumLaunchArgs(config = {}, env = process.env) {
 }
 
 function launchHeadless(config = {}) {
-  return isRecording(config) ? false : config.headless !== false;
+  return usesGstreamerRecording(config) ? false : config.headless !== false;
 }
 
 function webLaunchConfig(config = {}) {
@@ -201,7 +206,10 @@ class BrowserSession {
     this.videoDir = null;
     this.audioDir = undefined;
     this.audioRecorder = null;
+    this.playwrightRecorderActive = false;
+    this.playwrightVideoPath = null;
     this.mousePosition = { x: 0, y: 0 };
+    this.paused = false;
   }
 
   timeSync(event, fields, fn) {
@@ -218,8 +226,12 @@ class BrowserSession {
 
   async start() {
     this.timeSync('browser.start.ensure_run_dir', { dir: this.paths.runDir }, () => ensureDir(this.paths.runDir));
-    await this.time('browser.start.game_process', () => this.startGameProcess());
     const record = isRecording(this.config);
+    const backend = recordingBackend(this.config);
+    if (backend === 'playwright' && this.config.recordAudio) {
+      throw new Error(`the ${backend} recording backend is video-only; use gstreamer when recordAudio is enabled`);
+    }
+    await this.time('browser.start.game_process', () => this.startGameProcess());
     if (record) {
       this.videoDir = this.timeSync('browser.start.ensure_video_dir', () => ensureDir(path.join(this.paths.runDir, 'video')));
     }
@@ -245,6 +257,11 @@ class BrowserSession {
         deviceScaleFactor: Number(this.config.deviceScaleFactor ?? 1),
       })
     );
+    if (this.config.pauseController) {
+      await this.time('browser.start.install_pause_controller', () =>
+        this.context.addInitScript({ content: browserPauseInitScript() })
+      );
+    }
     if (record) {
       await this.time('browser.start.capture_viewport_stabilizer', () =>
         this.context.addInitScript(browserViewportStabilizerScript)
@@ -257,7 +274,7 @@ class BrowserSession {
     await this.time('browser.start.initial_navigate', { url: this.launchUrl }, () =>
       this.navigate({ url: this.launchUrl, waitAfterLoad: this.config.waitAfterLoad })
     );
-    if (record) {
+    if (backend === 'gstreamer') {
       const videoSource = this.config.videoSource || await this.time('browser.start.page_viewport_video_source', () =>
         pageViewportVideoSource(this.page)
       );
@@ -267,7 +284,30 @@ class BrowserSession {
         this.profiler ? this.profiler.child('audio-video-recorder') : null
       );
       await this.time('browser.start.audio_video_recorder_start', () => this.audioRecorder.start());
+    } else if (backend === 'playwright') {
+      await this.time('browser.start.playwright_recorder_start', () => this.startPlaywrightRecording());
     }
+  }
+
+  async startPlaywrightRecording() {
+    if (!this.page || !this.page.screencast || typeof this.page.screencast.start !== 'function') {
+      throw new Error('the installed Playwright version does not support page.screencast');
+    }
+    const fileName = safeName(this.config.playwrightVideoFileName || '000-runwave-playwright');
+    this.playwrightVideoPath = path.join(this.videoDir, `${fileName}.webm`);
+    await this.page.screencast.start({
+      path: this.playwrightVideoPath,
+      size: videoSize(this.config),
+    });
+    this.playwrightRecorderActive = true;
+    return this.playwrightVideoPath;
+  }
+
+  async stopPlaywrightRecording() {
+    if (!this.playwrightRecorderActive) return null;
+    this.playwrightRecorderActive = false;
+    await this.page.screencast.stop();
+    return fs.existsSync(this.playwrightVideoPath) ? this.playwrightVideoPath : null;
   }
 
   async startGameProcess() {
@@ -335,14 +375,27 @@ class BrowserSession {
   async click(click) {
     const holdMs = Math.max(0, Number(click.end ?? click.start) - Number(click.start ?? 0));
     const clickCount = Math.max(1, Math.round(Number(click.clickCount || 1)));
+    const pointerLocked = await this.time('browser.mouse.pointer_lock_state', () =>
+      this.page.evaluate(() => Boolean(document.pointerLockElement))
+    );
     await this.time('browser.mouse.click', {
       x: click.x,
       y: click.y,
       button: click.button,
       clickCount,
       holdMs,
+      pointerLocked,
     }, async () => {
-      await this.page.mouse.move(click.x, click.y);
+      // In pointer-lock games the click coordinates are irrelevant. Moving to
+      // them first makes Chromium emit a relative delta and its inverse while
+      // recentering, which can violently disturb an FPS camera before firing.
+      if (!pointerLocked) {
+        await this.page.mouse.move(click.x, click.y);
+        await this.page.evaluate(() => {
+          const controller = window.__runwavePauseController;
+          if (controller && controller.preparePointerLock) controller.preparePointerLock();
+        });
+      }
       for (let index = 0; index < clickCount; index += 1) {
         const eventClickCount = index + 1;
         await this.page.mouse.down({ button: click.button, clickCount: eventClickCount });
@@ -350,7 +403,49 @@ class BrowserSession {
         await this.page.mouse.up({ button: click.button, clickCount: eventClickCount });
       }
     });
-    this.mousePosition = { x: click.x, y: click.y };
+    if (!pointerLocked) this.mousePosition = { x: click.x, y: click.y };
+  }
+
+  async focusGame({ button = 'middle', x: requestedX, y: requestedY } = {}) {
+    const alreadyLocked = await this.page.evaluate(() => Boolean(document.pointerLockElement));
+    if (alreadyLocked) {
+      return { pointerLocked: true, x: this.mousePosition.x, y: this.mousePosition.y, button };
+    }
+    const surface = await this.page.evaluate(() => {
+      const canvases = Array.from(document.querySelectorAll('canvas'));
+      const canvas = canvases.sort((left, right) => {
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        return rightRect.width * rightRect.height - leftRect.width * leftRect.height;
+      })[0];
+      if (!canvas) return null;
+      const rect = canvas.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom };
+    });
+    if (!surface) throw new Error('focus_game requires a visible canvas');
+
+    let x = Number.isFinite(Number(requestedX)) ? Number(requestedX) : this.mousePosition.x;
+    let y = Number.isFinite(Number(requestedY)) ? Number(requestedY) : this.mousePosition.y;
+    if (x < surface.left || x >= surface.right || y < surface.top || y >= surface.bottom) {
+      x = Math.round((surface.left + surface.right) / 2);
+      y = Math.round((surface.top + surface.bottom) / 2);
+    }
+    if (x !== this.mousePosition.x || y !== this.mousePosition.y) {
+      await this.page.mouse.move(x, y);
+      this.mousePosition = { x, y };
+    }
+    await this.page.evaluate(() => {
+      const controller = window.__runwavePauseController;
+      if (!controller || !controller.preparePointerLock) {
+        throw new Error('pointer lock controller is unavailable');
+      }
+      controller.preparePointerLock();
+    });
+    await this.page.mouse.down({ button });
+    await this.page.mouse.up({ button });
+    await sleep(75);
+    const pointerLocked = await this.page.evaluate(() => Boolean(document.pointerLockElement));
+    return { pointerLocked, x, y, button };
   }
 
   async moveCursor(move) {
@@ -415,54 +510,41 @@ class BrowserSession {
 
   async moveView(move) {
     const viewport = this.page.viewportSize() || this.config.viewport || { width: 1024, height: 620 };
-    const x = Math.max(0, Math.min(viewport.width - 1, this.mousePosition.x + move.dx));
-    const y = Math.max(0, Math.min(viewport.height - 1, this.mousePosition.y + move.dy));
-    await this.time('browser.mouse.move', { x, y, dx: move.dx, dy: move.dy }, () => this.page.mouse.move(x, y));
-    await this.time('browser.mouse.dispatch_view_move_events', { x, y, dx: move.dx, dy: move.dy }, () =>
-      this.page.evaluate(({ dx, dy, x, y }) => {
-        const target = document.pointerLockElement || document.activeElement || document.querySelector('canvas') || document.body;
-        const targets = Array.from(new Set([target, document, window].filter(Boolean)));
-        const eventInit = {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-          clientX: x,
-          clientY: y,
-          screenX: x,
-          screenY: y,
-          movementX: dx,
-          movementY: dy,
-          buttons: 0,
-        };
-        const defineMovement = (event) => {
-          for (const [name, value] of [
-            ['movementX', dx],
-            ['movementY', dy],
-          ]) {
-            if (event[name] !== value) {
-              Object.defineProperty(event, name, { value, configurable: true });
-            }
-          }
-          return event;
-        };
+    const pointerLocked = await this.time('browser.mouse.pointer_lock_state', () =>
+      this.page.evaluate(() => Boolean(document.pointerLockElement))
+    );
+    const rawX = this.mousePosition.x + move.dx;
+    const rawY = this.mousePosition.y + move.dy;
+    if (pointerLocked) {
+      // Chromium produces a trusted requested delta and then a trusted inverse
+      // recenter event. The page-side controller suppresses that inverse, so
+      // games which reject synthetic MouseEvents still receive real movement.
+      await this.time('browser.mouse.dispatch_locked_view_move', {
+        dx: move.dx,
+        dy: move.dy,
+        requestedSteps: move.steps,
+      }, async () => {
+        const movementX = Math.round(Number(move.dx));
+        const movementY = Math.round(Number(move.dy));
+        const armed = await this.page.evaluate(({ x, y }) => {
+          const controller = window.__runwavePauseController;
+          return Boolean(controller && controller.preparePointerMove(x, y));
+        }, { x: movementX, y: movementY });
+        if (!armed) throw new Error('trusted pointer movement controller is unavailable');
+        await this.page.mouse.move(movementX, movementY);
+        // Unity and other frame-polled games consume mouse deltas during their
+        // next animation update. On a software renderer that frame can take
+        // much longer than the requested action duration, so wait for the
+        // actual frame instead of pausing on a wall-clock guess.
+        await this.page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => resolve())));
+      });
+      return;
+    }
 
-        for (const eventTarget of targets) {
-          eventTarget.dispatchEvent(defineMovement(new MouseEvent('mousemove', eventInit)));
-
-          if (typeof PointerEvent === 'function') {
-            eventTarget.dispatchEvent(
-              defineMovement(
-                new PointerEvent('pointermove', {
-                  ...eventInit,
-                  pointerId: 1,
-                  pointerType: 'mouse',
-                  isPrimary: true,
-                })
-              )
-            );
-          }
-        }
-      }, { dx: move.dx, dy: move.dy, x, y })
+    const x = Math.max(0, Math.min(viewport.width - 1, rawX));
+    const y = Math.max(0, Math.min(viewport.height - 1, rawY));
+    await this.time('browser.mouse.move', { x, y, dx: move.dx, dy: move.dy }, () =>
+      this.page.mouse.move(x, y, { steps: move.steps })
     );
     this.mousePosition = { x, y };
   }
@@ -471,6 +553,38 @@ class BrowserSession {
     return this.time('browser.state.read', { customExpression: Boolean(expression || this.stateExpression) }, () =>
       readPageState(this.page, expression || this.stateExpression)
     );
+  }
+
+  // The MCP agent receives a frame and then may spend seconds reasoning. The
+  // page-side controller stops the game clock and input at the renderer, while
+  // leaving screenshots and state reads available during the pause.
+  async pause() {
+    if (!this.page) return false;
+    const changed = await this.page.evaluate(() => {
+      const controller = window.__runwavePauseController;
+      if (!controller) throw new Error('runwave pause controller is unavailable');
+      return controller.pause();
+    });
+    this.paused = true;
+    return changed;
+  }
+
+  async resume() {
+    if (!this.page) return false;
+    const changed = await this.page.evaluate(() => {
+      const controller = window.__runwavePauseController;
+      if (!controller) throw new Error('runwave pause controller is unavailable');
+      return controller.resume();
+    });
+    this.paused = false;
+    return changed;
+  }
+
+  async isPaused() {
+    if (!this.page) return Boolean(this.paused);
+    return this.page.evaluate(() => Boolean(
+      window.__runwavePauseController && window.__runwavePauseController.isPaused()
+    ));
   }
 
   async stopGameProcess() {
@@ -485,11 +599,16 @@ class BrowserSession {
   }
 
   async close() {
+    let videoPath = null;
     let audioVideoPath = null;
     let closeError = null;
     try {
+      if (this.playwrightRecorderActive) {
+        videoPath = await this.time('browser.close.playwright_recorder_stop', () => this.stopPlaywrightRecording());
+      }
       if (this.audioRecorder) {
         audioVideoPath = await this.time('browser.close.audio_video_stop', () => this.audioRecorder.stop());
+        videoPath = audioVideoPath;
       }
       if (this.context) await this.time('browser.close.context_close', () => this.context.close());
       if (this.browser) await this.time('browser.close.browser_close', () => this.browser.close());
@@ -501,9 +620,10 @@ class BrowserSession {
     } catch (error) {
       if (!closeError) closeError = error;
     }
+    this.paused = false;
     if (closeError) throw closeError;
     return {
-      video: audioVideoPath,
+      video: videoPath,
       audioVideo: audioVideoPath || undefined,
     };
   }
@@ -516,5 +636,8 @@ module.exports = {
   chromiumLaunchArgs,
   launchHeadless,
   pageViewportVideoSource,
+  recordingBackend,
+  usesGstreamerRecording,
+  videoSize,
   webLaunchConfig,
 };

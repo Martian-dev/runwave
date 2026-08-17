@@ -1,10 +1,11 @@
 'use strict';
 
 const { z } = require('zod');
+const { inferDurationFromRawActions } = require('../../runwave/controller/src/action-normalizer');
 const { runStep } = require('../../runwave/controller/src/step-runner');
 const { action } = require('./schema');
 const { captureFrame, frameResult } = require('./frame');
-const { errorResult } = require('./result');
+const { errorResult, pauseNote } = require('./result');
 const { changedSince } = require('./diff');
 const { applyGrid } = require('./frame');
 
@@ -42,16 +43,23 @@ function registerPlayTools(server, registry) {
         stateExpression: args.state_expression,
       });
       return session.run(async () => {
-        const { file, margin } = await captureFrame(session, { name: 'launch', grid: args.grid });
-        session.lastFrame = file;
-        session.note({ event: 'launch', url: session.browser.launchUrl });
-        const state = await session.browser.state(session.config.stateExpression);
-        const result = frameResult({
-          file, margin, state, fullRes: args.full_res, label: 'initial',
-          extra: [`session_id: ${session.id}`, `viewport: ${session.config.viewport.width}x${session.config.viewport.height}`],
-        });
-        session.touch();
-        return result;
+        try {
+          await session.pauseForAgent('awaiting_agent');
+          const { file, margin } = await captureFrame(session, { name: 'launch', grid: args.grid });
+          session.lastFrame = file;
+          session.note({ event: 'launch', url: session.browser.launchUrl });
+          const state = await session.browser.state(session.config.stateExpression);
+          return frameResult({
+            file, margin, state, fullRes: args.full_res, label: 'initial',
+            extra: [
+              `session_id: ${session.id}`,
+              `viewport: ${session.config.viewport.width}x${session.config.viewport.height}`,
+              pauseNote(session.pauseMode),
+            ],
+          });
+        } finally {
+          await session.pauseForAgent('awaiting_agent');
+        }
       });
     } catch (error) {
       return errorResult(error);
@@ -97,6 +105,7 @@ function actResult({ session, step, args, previousFrame, actionName }) {
       changed === false
         ? 'frame is byte-identical to the previous one: the input probably did not reach the game. Check focus, try a different key, or hold it longer.'
         : null,
+      pauseNote(session.pauseMode),
     ],
   });
   session.touch();
@@ -115,13 +124,19 @@ function registerObserve(server, registry) {
     try {
       const session = registry.get(args.session_id);
       return session.run(async () => {
-        const name = `observe-${String(session.turn).padStart(3, '0')}`;
-        const { file, margin } = await captureFrame(session, { name, grid: args.grid });
-        const state = await session.browser.state(session.config.stateExpression);
-        session.lastFrame = file;
-        const result = frameResult({ file, margin, state, fullRes: args.full_res });
-        session.touch();
-        return result;
+        try {
+          await session.pauseForAgent('awaiting_agent');
+          const name = `observe-${String(session.turn).padStart(3, '0')}`;
+          const { file, margin } = await captureFrame(session, { name, grid: args.grid });
+          const state = await session.browser.state(session.config.stateExpression);
+          session.lastFrame = file;
+          return frameResult({
+            file, margin, state, fullRes: args.full_res,
+            extra: [pauseNote(session.pauseMode)],
+          });
+        } finally {
+          await session.pauseForAgent('awaiting_agent');
+        }
       });
     } catch (error) {
       return errorResult(error);
@@ -135,37 +150,62 @@ function registerAct(server, registry) {
     description: [
       'Send a timed sequence of inputs, then return the resulting frame.',
       'Offsets are milliseconds from the start of the sequence and actions may overlap, so one call can express "hold right for 900ms and jump at 150ms".',
-      'This is the main way to play: prefer one sequence that commits to a move over many single-input calls.',
+      'This is the main way to play. When direction, distance, or collision is uncertain, use a short 300-1200ms probe and inspect the result. Batch longer sequences only after the route or target is verified.',
+      'For uncertain actions longer than about 1500ms, request 2-3 trajectory captures so repeated landmarks or a filled screen reveal a collision before the whole sequence is wasted.',
     ].join(' '),
     inputSchema: {
       session_id: z.string(),
-      actions: z.array(action).min(1).describe('Inputs to run. Total sequence should stay under 8000ms.'),
+      actions: z.array(action).describe('Inputs to run. May be empty only when duration_ms is positive, to advance a load or animation without input.'),
+      duration_ms: z.number().min(0).max(8000).optional()
+        .describe('Total live-game time for the sequence. Use this to let a click-triggered load or animation settle before the final pause.'),
       captures: z.array(z.number().min(0)).max(MAX_FRAMES_PER_TURN).optional()
-        .describe('Offsets in ms to screenshot at. Defaults to the end of the sequence. Each extra frame costs context.'),
+        .describe('Offsets in ms to screenshot at. Defaults to the end. For uncertain navigation longer than ~1500ms, use 2-3 spaced offsets to detect collisions or missed turns; omit them on verified traversal to save context.'),
       note: z.string().optional().describe('Short intent for the journal, e.g. "cross bridge east".'),
       ...frameOptions,
     },
   }, async (args) => {
     try {
+      if (!args.actions.length && !(args.duration_ms > 0)) {
+        throw new Error('act requires at least one input or a positive duration_ms');
+      }
       const session = registry.get(args.session_id);
       return session.run(async () => {
-        const stepIndex = session.nextStepIndex();
-        const actionName = `act-${String(stepIndex).padStart(3, '0')}`;
-        const previousFrame = session.lastFrame;
-        const step = await runStep({
-          input: {
-            action: 'step',
-            action_name: actionName,
-            actions: args.actions,
-            ...(args.captures ? { captures: args.captures } : {}),
-            autoCaptures: false,
-          },
-          config: session.config,
-          browser: session.browser,
-          outputDir: session.actionDir(actionName),
-          nextStepIndex: stepIndex,
-          actionName,
-          profiler: null,
+        let step;
+        let previousFrame;
+        let actionName;
+        try {
+          await session.prepareForGameplay('act');
+          const stepIndex = session.nextStepIndex();
+          actionName = `act-${String(stepIndex).padStart(3, '0')}`;
+          previousFrame = session.lastFrame;
+          const duration = args.duration_ms ?? inferDurationFromRawActions(args.actions);
+          const captures = args.captures
+            ? [...args.captures, duration]
+            : undefined;
+          step = await runStep({
+            input: {
+              action: 'step',
+              action_name: actionName,
+              actions: args.actions,
+              ...(args.duration_ms !== undefined ? { duration: args.duration_ms } : {}),
+              ...(captures ? { captures } : {}),
+              autoCaptures: false,
+            },
+            config: session.config,
+            browser: session.browser,
+            outputDir: session.actionDir(actionName),
+            nextStepIndex: session.stepIndex,
+            actionName,
+            beforeEndCapture: () => session.pauseForAgent('awaiting_agent'),
+            profiler: null,
+          });
+        } finally {
+          await session.pauseForAgent('awaiting_agent');
+        }
+        session.appendPlaythroughStep({
+          duration: step.duration,
+          actions: step.actions,
+          note: args.note,
         });
         return actResult({ session, step, args, previousFrame, actionName });
       });

@@ -40,6 +40,13 @@ function buildSessionConfig(options = {}) {
     // The agent asks for frames explicitly; interval captures would spend
     // context on frames nobody requested.
     autoCaptures: false,
+    // Install the renderer-level pause gate. This remains opt-in so the normal
+    // runwave playtest path is not affected by MCP-specific browser patches.
+    pauseController: true,
+    // Pointer-locked games need continuous mouse holds for actions such as
+    // firing and aiming. Keep the normal Runwave/UI click guard at 100ms; only
+    // MCP gameplay sessions opt into a bounded longer hold.
+    maxActionSpanMs: { click: 2000 },
     markGridSampleMode: CELL_SAMPLE_MODE,
     ...(options.markGridRows ? { markGridRows: Number(options.markGridRows) } : {}),
     ...(options.markGridCols ? { markGridCols: Number(options.markGridCols) } : {}),

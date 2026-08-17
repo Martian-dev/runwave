@@ -41,10 +41,18 @@ function gridNote(image, margin) {
   return `grid overlay is on. The image includes a ${margin}px label margin on every side, so image pixel (px, py) is viewport (px - ${margin}, py - ${margin}). Prefer overlay_row/overlay_col targets while the grid is on.`;
 }
 
+function pauseNote(mode) {
+  if (mode === 'manual') {
+    return 'game_status: paused by manual override; call resume_game before act or reset_game.';
+  }
+  return 'game_status: paused at this frame; act or reset_game resumes only for its controlled duration.';
+}
+
 module.exports = {
   errorResult,
   frameBlocks,
   gridNote,
+  pauseNote,
   stateText,
   textBlock,
 };

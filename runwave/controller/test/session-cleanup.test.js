@@ -215,6 +215,35 @@ test('web start configuration can launch a game directory through a local port',
   assert.equal(config.web.httpTimeoutMs, 60000);
 });
 
+test('playwright recording is represented as a headless web session', () => {
+  const config = startSessionConfig({
+    action: 'start',
+    action_name: 'playwright-recording',
+    url: 'http://127.0.0.1:4123/',
+    viewport: { width: 1280, height: 720 },
+    record: true,
+    recordingBackend: 'playwright',
+  });
+
+  assert.equal(config.context.record, true);
+  assert.equal(config.context.recordingBackend, 'playwright');
+  assert.equal(config.browser.headless, true);
+});
+
+test('linux sessions reject the playwright-only recording backend', () => {
+  assert.throws(
+    () => startSessionConfig({
+      action: 'start',
+      action_name: 'invalid-native-recording',
+      kind: 'linux',
+      command: './game',
+      record: true,
+      recordingBackend: 'playwright',
+    }),
+    /only available for web sessions/
+  );
+});
+
 test('linux start rejects a live session with a different native launch command', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'runwave-linux-target-mismatch-'));
   const originalStart = {

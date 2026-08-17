@@ -100,7 +100,10 @@ function normalizeTiming(action, type, duration, options) {
     return invalidTiming(`invalid ${type} interval`, action, options);
   }
 
-  const maxSpan = MAX_ACTION_SPAN_MS[type];
+  const configuredMaxSpan = Number(options.config?.maxActionSpanMs?.[type]);
+  const maxSpan = Number.isFinite(configuredMaxSpan)
+    ? configuredMaxSpan
+    : MAX_ACTION_SPAN_MS[type];
   if (Number.isFinite(maxSpan) && end - start > maxSpan) {
     return invalidTiming(`${type} action duration exceeds ${maxSpan}ms`, action, options);
   }

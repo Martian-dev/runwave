@@ -15,9 +15,6 @@ function compactState(raw) {
   if (active && active.tagName && active.tagName !== 'BODY') {
     state.focus = [active.tagName, active.id ? `#${active.id}` : ''].filter(Boolean).join('');
   }
-  if (generic.pointerLockElement && generic.pointerLockElement.tagName) {
-    state.pointer_locked = true;
-  }
 
   // The largest canvas is almost always the game surface. Its client rect tells
   // an agent which part of the viewport is actually playable.
@@ -25,6 +22,7 @@ function compactState(raw) {
     .filter((canvas) => canvas && canvas.clientWidth > 0 && canvas.clientHeight > 0)
     .sort((left, right) => right.clientWidth * right.clientHeight - left.clientWidth * left.clientHeight)[0];
   if (surface) {
+    state.pointer_locked = Boolean(generic.pointerLockElement && generic.pointerLockElement.tagName);
     state.game_area = {
       x: Math.round(surface.left ?? surface.x ?? 0),
       y: Math.round(surface.top ?? surface.y ?? 0),
